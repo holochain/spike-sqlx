@@ -1,8 +1,8 @@
-use rusqlite::*;
 use chrono::prelude::*;
-use std::fmt::Write;
-use rand::Rng;
 use ghost_actor::dependencies::futures::FutureExt;
+use rand::Rng;
+use rusqlite::*;
+use std::fmt::Write;
 
 /// Simple error type.
 #[derive(Debug)]
@@ -80,13 +80,12 @@ ghost_actor::ghost_chan! {
 }
 
 /// Spawn a database actor.
-pub async fn spawn_database<P: AsRef<std::path::Path>>(path: P) -> Result<ghost_actor::GhostSender<DbApi>> {
+pub async fn spawn_database<P: AsRef<std::path::Path>>(
+    path: P,
+) -> Result<ghost_actor::GhostSender<DbApi>> {
     let builder = ghost_actor::actor_builder::GhostActorBuilder::new();
 
-    let sender = builder
-        .channel_factory()
-        .create_channel::<DbApi>()
-        .await?;
+    let sender = builder.channel_factory().create_channel::<DbApi>().await?;
 
     tokio::task::spawn(builder.spawn(Db::new(path).await?));
 
@@ -103,39 +102,35 @@ impl Db {
         let con = Connection::open(path)?;
 
         // set up encryption
-        con.pragma_update(
-            None,
-            "key",
-            &get_encryption_key_shim(),
-        )?;
+        con.pragma_update(None, "key", &get_encryption_key_shim())?;
 
         // set to faster write-ahead-log mode
-        con.pragma_update(
-            None,
-            "journal_mode",
-            &"WAL".to_string(),
-        )?;
+        con.pragma_update(None, "journal_mode", &"WAL".to_string())?;
 
         // create entries table
-        con.execute("
+        con.execute(
+            "
             CREATE TABLE IF NOT EXISTS entries (
                 hash            BLOB PRIMARY KEY,
                 dht_loc         INT NOT NULL,
                 created_at      TEXT NOT NULL
-            );", NO_PARAMS)?;
+            );",
+            NO_PARAMS,
+        )?;
 
         // create dht_loc + created_at index
         // we can have as many indexes as we want
         // i.e. we could have separate dht_loc only index
         // if we want queries that don't care about created_at, etc.
-        con.execute("
+        con.execute(
+            "
             CREATE INDEX IF NOT EXISTS entries_query_idx ON entries (
                 dht_loc, created_at
-            );", NO_PARAMS)?;
+            );",
+            NO_PARAMS,
+        )?;
 
-        Ok(Self {
-            con,
-        })
+        Ok(Self { con })
     }
 }
 
@@ -194,18 +189,16 @@ impl DbApiHandler for Db {
             )?;
 
             // map our results to the rust struct
-            for r in query.query_map(params![
-                dht_loc_start,
-                dht_loc_end,
-                created_at_start,
-                created_at_end,
-            ], |row| {
-                Ok(Entry {
-                    hash: row.get(0)?,
-                    dht_loc: row.get(1)?,
-                    created_at: row.get(2)?,
-                })
-            })? {
+            for r in query.query_map(
+                params![dht_loc_start, dht_loc_end, created_at_start, created_at_end,],
+                |row| {
+                    Ok(Entry {
+                        hash: row.get(0)?,
+                        dht_loc: row.get(1)?,
+                        created_at: row.get(2)?,
+                    })
+                },
+            )? {
                 out.push(r?);
             }
         }
