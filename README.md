@@ -1,5 +1,7 @@
 # spike-rust-sqlcipher-test
 
+[Video Demo / Walkthrough (4:24)](https://www.youtube.com/watch?v=_pDPXtK0AmM)
+
 ### Setup
 
 `rusqlite` doesn't yet include a bundled sqlcipher lib, so for now we need it to exist on the host system.

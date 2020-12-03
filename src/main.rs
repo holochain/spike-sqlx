@@ -109,8 +109,7 @@ impl Db {
 
         // create entries table
         con.execute(
-            "
-            CREATE TABLE IF NOT EXISTS entries (
+            "CREATE TABLE IF NOT EXISTS entries (
                 hash            BLOB PRIMARY KEY,
                 dht_loc         INT NOT NULL,
                 created_at      TEXT NOT NULL
@@ -123,8 +122,7 @@ impl Db {
         // i.e. we could have separate dht_loc only index
         // if we want queries that don't care about created_at, etc.
         con.execute(
-            "
-            CREATE INDEX IF NOT EXISTS entries_query_idx ON entries (
+            "CREATE INDEX IF NOT EXISTS entries_query_idx ON entries (
                 dht_loc, created_at
             );",
             NO_PARAMS,
