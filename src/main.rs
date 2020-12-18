@@ -2,8 +2,6 @@ use chrono::prelude::*;
 use ghost_actor::dependencies::futures::FutureExt;
 use rand::Rng;
 use rusqlite::*;
-use std::fmt::Write;
-
 /// Simple error type.
 #[derive(Debug)]
 pub struct Error(Box<dyn std::error::Error + Send + Sync>);
@@ -22,23 +20,12 @@ qf!( rusqlite::Error ghost_actor::GhostError );
 /// Result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Encryption key for sqlcipher.
-struct Key(pub Vec<u8>);
-
-impl ToSql for Key {
-    fn to_sql(&self) -> rusqlite::Result<types::ToSqlOutput<'_>> {
-        let mut s = String::new();
-        for b in &self.0 {
-            write!(&mut s, "{:02X}", b)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        }
-        Ok(types::ToSqlOutput::Owned(types::Value::Text(s)))
-    }
-}
-
 /// Simulate getting an encryption key from Lair.
-fn get_encryption_key_shim() -> Key {
-    Key(vec![0; 32])
+fn get_encryption_key_shim() -> [u8; 32] {
+    [
+        26, 111, 7, 31, 52, 204, 156, 103, 203, 171, 156, 89, 98, 51, 158, 143, 57, 134, 93, 56,
+        199, 225, 53, 141, 39, 77, 145, 130, 136, 108, 96, 201,
+    ]
 }
 
 /// Demo entry type for database.
@@ -101,8 +88,17 @@ impl Db {
     pub async fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let con = Connection::open(path)?;
 
-        // set up encryption
-        con.pragma_update(None, "key", &get_encryption_key_shim())?;
+        let key = get_encryption_key_shim();
+        let mut cmd = *br#"PRAGMA key = "x'0000000000000000000000000000000000000000000000000000000000000000'";"#;
+        {
+            use std::io::Write;
+            let mut c = std::io::Cursor::new(&mut cmd[16..80]);
+            for b in &key {
+                write!(c, "{:02X}", b)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            }
+        }
+        con.execute(std::str::from_utf8(&cmd).unwrap(), NO_PARAMS)?;
 
         // set to faster write-ahead-log mode
         con.pragma_update(None, "journal_mode", &"WAL".to_string())?;
