@@ -1533,7 +1533,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "spike-rust-sqlcipher-test"
+name = "spike-sqlx"
 version = "0.1.0"
 dependencies = [
  "anyhow",

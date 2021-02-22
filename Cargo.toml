@@ -1,7 +1,7 @@
 [package]
-name = "spike-rust-sqlcipher-test"
+name = "spike-sqlx"
 version = "0.1.0"
-authors = ["neonphog <neonphog@gmail.com>"]
+authors = ["neonphog <neonphog@gmail.com>", "maackle <maackle.d@gmail.com>"]
 edition = "2018"
 
 [dependencies]
@@ -12,7 +12,10 @@ ghost_actor = "0.3.0-alpha.1"
 rand = "0.7.3"
 tokio = { version = "0.3.5", features = [ "full" ] }
 
+# to actually use sqlcipher, need to turn this on, but this requires a custom
+# build of libsqlcipher-dev
 # libsqlite3-sys = { version = "0.20", features = ["sqlcipher"] }
+
 sqlx = { version = "0.5", features = [
   "chrono",
   "macros",
