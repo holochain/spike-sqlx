@@ -5,17 +5,18 @@ authors = ["neonphog <neonphog@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+anyhow = "1"
 chrono = "0.4.19"
+futures = "0.3"
 ghost_actor = "0.3.0-alpha.1"
 rand = "0.7.3"
-rusqlite = { version = "0.24.1", features = [
-  "blob",        # better integration with blob types (Read, Write, etc)
-  "chrono",      # integration with chrono crate
-  "functions",   # rust scalar / agg / window functions
-  "hooks",       # sqlite notification callbacks
-  "serde_json",  # integration with serde_json crate
-  "sqlcipher",   # enable at-rest encryption
-  "url",         # integration with url crate
-  "uuid",        # integration with uuid crate
-] }
 tokio = { version = "0.3.5", features = [ "full" ] }
+
+# libsqlite3-sys = { version = "0.20", features = ["sqlcipher"] }
+sqlx = { version = "0.5", features = [
+  "chrono",
+  "macros",
+  "migrate",
+  "runtime-tokio-native-tls",
+  "sqlite",
+]}

@@ -1,24 +1,7 @@
 use chrono::prelude::*;
-use ghost_actor::dependencies::futures::FutureExt;
+use futures::StreamExt;
 use rand::Rng;
-use rusqlite::*;
-/// Simple error type.
-#[derive(Debug)]
-pub struct Error(Box<dyn std::error::Error + Send + Sync>);
-
-macro_rules! qf {
-    ($($t:ty)*) => {$(
-        impl From<$t> for Error {
-            fn from(e: $t) -> Self {
-                Self(Box::new(e))
-            }
-        }
-    )*};
-}
-qf!( rusqlite::Error ghost_actor::GhostError );
-
-/// Result type.
-pub type Result<T> = std::result::Result<T, Error>;
+use sqlx::*;
 
 /// Simulate getting an encryption key from Lair.
 fn get_encryption_key_shim() -> [u8; 32] {
@@ -29,7 +12,7 @@ fn get_encryption_key_shim() -> [u8; 32] {
 }
 
 /// Demo entry type for database.
-#[derive(Debug)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Entry {
     hash: Vec<u8>,
     dht_loc: u32,
@@ -50,174 +33,145 @@ impl Entry {
     }
 }
 
-ghost_actor::ghost_chan! {
-    /// Our database api.
-    pub chan DbApi<Error> {
-        /// Insert an entry into the database.
-        fn insert(entry: Entry) -> ();
+async fn make_connection<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<SqliteConnection> {
+    let mut con = SqliteConnection::connect(&path.as_ref().to_string_lossy()).await?;
 
-        /// Query a range of entries from the database.
-        fn query(
-            dht_loc_start: u32,
-            dht_loc_end: u32,
-            created_at_start: DateTime<Utc>,
-            created_at_end: DateTime<Utc>,
-        ) -> Vec<Entry>;
-    }
-}
-
-/// Spawn a database actor.
-pub async fn spawn_database<P: AsRef<std::path::Path>>(
-    path: P,
-) -> Result<ghost_actor::GhostSender<DbApi>> {
-    let builder = ghost_actor::actor_builder::GhostActorBuilder::new();
-
-    let sender = builder.channel_factory().create_channel::<DbApi>().await?;
-
-    tokio::task::spawn(builder.spawn(Db::new(path).await?));
-
-    Ok(sender)
-}
-
-/// Internal DbApi ghost_actor implementation.
-struct Db {
-    con: Connection,
-}
-
-impl Db {
-    pub async fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        let con = Connection::open(path)?;
-
-        let key = get_encryption_key_shim();
-        let mut cmd = *br#"PRAGMA key = "x'0000000000000000000000000000000000000000000000000000000000000000'";"#;
-        {
-            use std::io::Write;
-            let mut c = std::io::Cursor::new(&mut cmd[16..80]);
-            for b in &key {
-                write!(c, "{:02X}", b)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            }
+    let key = get_encryption_key_shim();
+    let mut cmd =
+        *br#"PRAGMA key = "x'0000000000000000000000000000000000000000000000000000000000000000'";"#;
+    {
+        use std::io::Write;
+        let mut c = std::io::Cursor::new(&mut cmd[16..80]);
+        for b in &key {
+            write!(c, "{:02X}", b)?;
         }
-        con.execute(std::str::from_utf8(&cmd).unwrap(), NO_PARAMS)?;
+    }
+    con.execute(std::str::from_utf8(&cmd).unwrap()).await?;
 
-        // set to faster write-ahead-log mode
-        con.pragma_update(None, "journal_mode", &"WAL".to_string())?;
+    // set to faster write-ahead-log mode
+    // con.pragma_update(None, "journal_mode", &"WAL".to_string())?;
 
-        // create entries table
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS entries (
+    // create entries table
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS entries (
                 hash            BLOB PRIMARY KEY,
                 dht_loc         INT NOT NULL,
                 created_at      TEXT NOT NULL
             );",
-            NO_PARAMS,
-        )?;
+        // NO_PARAMS,
+    )
+    .await?;
 
-        // create dht_loc + created_at index
-        // we can have as many indexes as we want
-        // i.e. we could have separate dht_loc only index
-        // if we want queries that don't care about created_at, etc.
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS entries_query_idx ON entries (
+    // create dht_loc + created_at index
+    // we can have as many indexes as we want
+    // i.e. we could have separate dht_loc only index
+    // if we want queries that don't care about created_at, etc.
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS entries_query_idx ON entries (
                 dht_loc, created_at
             );",
-            NO_PARAMS,
-        )?;
-
-        Ok(Self { con })
-    }
+        // NO_PARAMS,
+    )
+    .await?;
+    Ok(con)
 }
 
-impl ghost_actor::GhostControlHandler for Db {}
+// fn handle_query(
+//     &mut self,
+//     dht_loc_start: u32,
+//     dht_loc_end: u32,
+//     created_at_start: DateTime<Utc>,
+//     created_at_end: DateTime<Utc>,
+// ) -> DbApiHandlerResult<Vec<Entry>> {
+//     // this transaction is needed even less since we're not writing,
+//     // but if we were reading from multiple tables would keep them
+//     // consistent.
+//     let tx = self.con.transaction()?;
 
-impl ghost_actor::GhostHandler<DbApi> for Db {}
+//     let mut out = Vec::new();
 
-impl DbApiHandler for Db {
-    fn handle_insert(&mut self, entry: Entry) -> DbApiHandlerResult<()> {
-        // best practices to use transactions
-        // (although we're only executing a single statement here
-        //  so strictly not needed)
-        let tx = self.con.transaction()?;
+//     {
+//         // Really we'd want to use dht_arc with the start / half-length,
+//         // then branch on potential for a wrapping space that inverts
+//         // the `> <` signs below - but this is just a PoC.
+//         let mut query = tx.prepare_cached(
+//             "SELECT hash, dht_loc, created_at FROM entries
+// WHERE dht_loc >= ?1
+// AND dht_loc <= ?2
+// AND created_at >= ?3
+// AND created_at <= ?4;",
+//         )?;
 
-        {
-            // rusqlite keeps a cache of prepared statements
-            // speeds things up a bit.
-            let mut ins = tx.prepare_cached(
-                "INSERT INTO entries (hash, dht_loc, created_at) VALUES (?1, ?2, ?3)",
-            )?;
+//         // map our results to the rust struct
+//         for r in query.query_map(
+//             params![dht_loc_start, dht_loc_end, created_at_start, created_at_end,],
+//             |row| {
+//                 Ok(Entry {
+//                     hash: row.get(0)?,
+//                     dht_loc: row.get(1)?,
+//                     created_at: row.get(2)?,
+//                 })
+//             },
+//         )? {
+//             out.push(r?);
+//         }
+//     }
 
-            // execute the insert
-            ins.execute(params![entry.hash, entry.dht_loc, entry.created_at])?;
-        }
+//     // we're not writing, we can rollback this transaction
+//     // essentially a no-op
+//     tx.rollback()?;
 
-        // commit the transaction
-        tx.commit()?;
-
-        Ok(async move { Ok(()) }.boxed().into())
-    }
-
-    fn handle_query(
-        &mut self,
-        dht_loc_start: u32,
-        dht_loc_end: u32,
-        created_at_start: DateTime<Utc>,
-        created_at_end: DateTime<Utc>,
-    ) -> DbApiHandlerResult<Vec<Entry>> {
-        // this transaction is needed even less since we're not writing,
-        // but if we were reading from multiple tables would keep them
-        // consistent.
-        let tx = self.con.transaction()?;
-
-        let mut out = Vec::new();
-
-        {
-            // Really we'd want to use dht_arc with the start / half-length,
-            // then branch on potential for a wrapping space that inverts
-            // the `> <` signs below - but this is just a PoC.
-            let mut query = tx.prepare_cached(
-                "SELECT hash, dht_loc, created_at FROM entries
-                    WHERE dht_loc >= ?1
-                    AND dht_loc <= ?2
-                    AND created_at >= ?3
-                    AND created_at <= ?4;",
-            )?;
-
-            // map our results to the rust struct
-            for r in query.query_map(
-                params![dht_loc_start, dht_loc_end, created_at_start, created_at_end,],
-                |row| {
-                    Ok(Entry {
-                        hash: row.get(0)?,
-                        dht_loc: row.get(1)?,
-                        created_at: row.get(2)?,
-                    })
-                },
-            )? {
-                out.push(r?);
-            }
-        }
-
-        // we're not writing, we can rollback this transaction
-        // essentially a no-op
-        tx.rollback()?;
-
-        Ok(async move { Ok(out) }.boxed().into())
-    }
-}
+//     Ok(async move { Ok(out) }.boxed().into())
+// }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     // spawn the database actor
-    let con = spawn_database("./DATABASE.SQLITE").await?;
+    let mut con = make_connection("sqlite::memory:").await?;
 
-    // insert a random entry
-    con.insert(Entry::rand()).await?;
+    let entry = Entry::rand();
+    let entry_hash = entry.hash.clone();
 
-    // build up and execute a query
-    let start = Utc.ymd(1970, 1, 1).and_hms(0, 1, 1);
-    let end = Utc::now();
-    let res = con.query(0, u32::MAX, start, end).await?;
-    println!("{:#?}", res);
+    con.transaction(|tx| {
+        Box::pin(async {
+            sqlx::query("INSERT INTO entries (hash, dht_loc, created_at) VALUES (?1, ?2, ?3)")
+                .bind(entry.hash)
+                .bind(entry.dht_loc)
+                .bind(entry.created_at)
+                .execute(tx)
+                .await
+        })
+    })
+    .await?;
+
+    let fetched: Vec<Entry> = con
+        .transaction(|tx| {
+            Box::pin(async {
+                let start = Utc.ymd(1970, 1, 1).and_hms(0, 1, 1);
+                let end = Utc::now();
+                sqlx::query_as::<_, Entry>(
+                    "SELECT hash, dht_loc, created_at FROM entries
+            WHERE dht_loc >= ?1
+            AND dht_loc <= ?2
+            AND created_at >= ?3
+            AND created_at <= ?4
+            ;",
+                )
+                .bind(0)
+                .bind(u32::MAX)
+                .bind(start)
+                .bind(end)
+                .fetch(tx)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<Result<Vec<_>>>()
+            })
+        })
+        .await?;
+
+    // let res = con.query(0, u32::MAX, start, end).await?;
+    println!("{:#?}", fetched);
 
     Ok(())
 }
